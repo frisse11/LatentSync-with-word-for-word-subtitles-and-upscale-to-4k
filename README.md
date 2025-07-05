@@ -29,12 +29,15 @@ This fork introduces the following key functionalities:
 
 ## Demo: Before & After
 
-You can find demonstration videos of the original and processed output in the `demo/` directory of this repository:
+Here are visual demonstrations of the original video compared to the processed output with colored subtitles:
 
-*   **Original Video (Before):** `demo/before.mp4`
-*   **Processed Video (After):** `demo/after.mp4`
+### Original Video (Before)
+<video src="demo/before.mp4" controls muted loop autoplay width="600"></video>
 
-*(To embed these directly in the README, you would typically convert them to optimized GIF files or compressed MP4s and use Markdown image syntax `![Alt Text](path/to/file.gif)` or HTML `<video>` tags. For example, `![Before Demo](demo/before.gif)`)*
+### Processed Video with Subtitles (After)
+<video src="demo/after.mp4" controls muted loop autoplay width="600"></video>
+
+*(Note: These are raw .mp4 video files embedded directly. Playback performance may vary depending on your browser and network connection. You can find these files in the `demo/` directory of this repository.)*
 
 ## Installation and Usage
 

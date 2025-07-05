@@ -32,13 +32,12 @@ This fork introduces the following key functionalities:
 Here are visual demonstrations of the original video compared to the processed output with colored subtitles:
 
 ### Original Video (Before)
-<video src="demo/before.mp4" controls muted loop autoplay width="600"></video>
+![Original Video Demo](demo/before.gif)
 
 ### Processed Video with Subtitles (After)
-<video src="demo/after.mp4" controls muted loop autoplay width="600"></video>
+![Processed Video Demo](demo/after.gif)
 
-*(Note: These are raw .mp4 video files embedded directly. Playback performance may vary depending on your browser and network connection. You can find these files in the `demo/` directory of this repository.)*
-
+*(Note: These demonstrations are optimized GIF files for direct viewing in the README. The original .mp4 files can be found in the `demo/` directory of this repository.)*
 ## Installation and Usage
 
 Follow these steps to set up and run the Gradio Web UI:

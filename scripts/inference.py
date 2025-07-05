@@ -1,19 +1,7 @@
-# Copyright (c) 2024 Bytedance Ltd. and/or its affiliates
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
+# dit is inference.py
 import argparse
 import os
+import cv2
 from omegaconf import OmegaConf
 import torch
 from diffusers import AutoencoderKL, DDIMScheduler
@@ -21,8 +9,12 @@ from latentsync.models.unet import UNet3DConditionModel
 from latentsync.pipelines.lipsync_pipeline import LipsyncPipeline
 from accelerate.utils import set_seed
 from latentsync.whisper.audio2feature import Audio2Feature
-from DeepCache import DeepCacheSDHelper
 
+def get_video_fps(video_path):
+    cap = cv2.VideoCapture(video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    cap.release()
+    return int(fps)
 
 def main(config, args):
     if not os.path.exists(args.video_path):
@@ -58,25 +50,20 @@ def main(config, args):
     vae.config.scaling_factor = 0.18215
     vae.config.shift_factor = 0
 
-    unet, _ = UNet3DConditionModel.from_pretrained(
+    denoising_unet, _ = UNet3DConditionModel.from_pretrained(
         OmegaConf.to_container(config.model),
         args.inference_ckpt_path,
         device="cpu",
     )
 
-    unet = unet.to(dtype=dtype)
+    denoising_unet = denoising_unet.to(dtype=dtype)
 
     pipeline = LipsyncPipeline(
         vae=vae,
         audio_encoder=audio_encoder,
-        unet=unet,
+        denoising_unet=denoising_unet,
         scheduler=scheduler,
     ).to("cuda")
-
-    # use DeepCache
-    helper = DeepCacheSDHelper(pipe=pipeline)
-    helper.set_params(cache_interval=3, cache_branch_id=0)
-    helper.enable()
 
     if args.seed != -1:
         set_seed(args.seed)
@@ -84,6 +71,12 @@ def main(config, args):
         torch.seed()
 
     print(f"Initial seed: {torch.initial_seed()}")
+
+    # Get original video FPS
+    original_fps = get_video_fps(args.video_path)
+
+    # Override config FPS with original FPS
+    config.data.video_fps = original_fps
 
     pipeline(
         video_path=args.video_path,
@@ -96,9 +89,9 @@ def main(config, args):
         weight_dtype=dtype,
         width=config.data.resolution,
         height=config.data.resolution,
+        fps=original_fps,  # Explicitly pass original FPS
         mask_image_path=config.data.mask_image_path,
     )
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

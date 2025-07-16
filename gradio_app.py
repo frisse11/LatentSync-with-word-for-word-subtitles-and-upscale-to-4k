@@ -399,7 +399,7 @@ def run_latentsync_process(
                     f"Padding audio by {video_duration - audio_duration:.2f} seconds...", # status_latentsync
                     gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False), # btn updates (disable all)
                     current_video_state, current_audio_state, current_transcription_state, None, None, # states (keep current, clear latentsync, padded_audio state)
-                    gr.update(value=current_video_path_state), gr.update(value=current_audio_path_state), # 12-13: video_input, audio_input visual (keep)
+                    gr.update(value=current_video_state), gr.update(value=current_audio_state), # 12-13: video_input, audio_input visual (keep)
                     gr.update(selected=2) # 14: stay on latentsync tab
                 )
                 temp_padded_audio_path = pad_audio_with_silence(audio_for_latentsync_path, video_duration, TEMP_DIR)
@@ -666,19 +666,19 @@ with gr.Blocks(title="LatentSync with Colored Subtitles") as demo:
 
         with gr.TabItem("3. Run LatentSync", id="tab_latentsync"):
             gr.Markdown("### Adjust LatentSync parameters and run the process.")
-            guidance_scale = gr.Slider(1.0, 3.0, 1.5, label="Guidance Scale", interactive=True)
-            inference_steps = gr.Slider(10, 50, 20, label="Inference Steps", interactive=True)
-            seed = gr.Number(value=1247, label="Seed", interactive=True)
-            enable_padding = gr.Checkbox(label="Pad Audio to Video Length (if shorter)", value=True, interactive=True)
+            guidance_scale = gr.Slider(1.0, 3.0, 1.5, label="Guidance Scale", info="**Higher values**: follow the audio more closely, but may reduce creativity. **Lower values**: more creative, but may be less synchronized.", interactive=True)
+            inference_steps = gr.Slider(10, 50, 20, label="Inference Steps", info="**More steps**: higher quality, but slower processing. **Fewer steps**: faster, but may reduce quality.", interactive=True)
+            seed = gr.Number(value=1247, label="Seed", info="**Same seed**: produces the same result for the same input. **Different seed**: produces a different result.", interactive=True)
+            enable_padding = gr.Checkbox(label="Pad Audio to Video Length (if shorter)", value=False, info="**If the audio is shorter than the video, enabling this will add silence to the end of the audio to match the video's duration.** This ensures the entire video is processed, preventing potential truncation if the audio stream ends prematurely.", interactive=True)
             latentsync_btn = gr.Button("Run LatentSync", interactive=False)
             status_latentsync = gr.Textbox(label="LatentSync Status", interactive=False, lines=1)
 
 
         with gr.TabItem("4. Finalize Video", id="tab_finalize"):
             gr.Markdown("### Apply subtitles and finalize the output video.")
-            font_size = gr.Slider(40, 200, 120, label="Font Size", interactive=True)
-            vertical_offset = gr.Slider(0, 100, 24, label="Vertical Offset (%) (0=Bottom, 100=Top)", interactive=True)
-            force_4k = gr.Checkbox(label="Force 4K Vertical (2160x3840) Output", value=False, interactive=True)
+            font_size = gr.Slider(40, 200, 69, label="Font Size", info="**Larger value**: bigger subtitles. **Smaller value**: smaller subtitles.", interactive=True)
+            vertical_offset = gr.Slider(0, 100, 24, label="Vertical Offset (%)", info="**0**: bottom of the screen. **100**: top of the screen.", interactive=True)
+            force_4k = gr.Checkbox(label="Force 4K Vertical (2160x3840) Output", value=False, info="**Enable**: resizes the output to 4K vertical resolution. **Disable**: keeps the original resolution.", interactive=True)
             finalize_btn = gr.Button("Apply Subtitles & Finalize Video", interactive=False)
             # Corrected: Added height, width, and autoplay for smaller video display
             output_video = gr.Video(label="Output Video", interactive=False, height=300, width=400, autoplay=True)

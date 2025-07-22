@@ -13,6 +13,13 @@ from transformers import pipeline
 import librosa
 import random
 import pandas as pd
+import sys
+
+# Add the current directory to the system path to ensure local modules are found
+sys.path.append(os.getcwd())
+
+from detect_orientation import get_video_properties
+from meta_tag import apply_random_metadata
 
 # --- General Configuration ---
 CONFIG_PATH = Path("configs/unet/stage2.yaml")
@@ -189,34 +196,6 @@ def process_video_with_colored_words_from_data(
         # Corrected: Use ignore_errors=True for shutil.rmtree for robustness
         shutil.rmtree(temp_images_dir, ignore_errors=True) # Use ignore_errors parameter
 
-# --- Gradio Workflow Functions (modified to use the refined helper functions) ---
-
-def handle_upload_change(video_path_str, audio_path_str):
-    """Updates states, status and enables/disables transcribe button."""
-    video_present = bool(video_path_str)
-    audio_present = bool(audio_path_str)
-
-    if video_present and audio_present:
-        status_msg = "Video and Audio uploaded. Ready to transcribe."
-        transcribe_active = True
-    elif video_present:
-        status_msg = "Video uploaded. Waiting for audio..."
-        transcribe_active = False
-    elif audio_present:
-        status_msg = "Audio uploaded. Waiting for video..."
-        transcribe_active = False
-    else:
-        status_msg = "Please upload both video and audio files."
-        transcribe_active = False
-
-    # Return values for video_state, audio_state, status_upload, transcribe_btn
-    return (
-        video_path_str, # video_state
-        audio_path_str, # audio_state
-        gr.update(value=status_msg, visible=True), # status_upload
-        gr.update(interactive=transcribe_active) # transcribe_btn
-    )
-
 def transcribe_audio_get_data_for_df(input_audio_path):
     """
     Transcribes audio using Whisper pipeline and returns data for DataFrame.
@@ -279,336 +258,6 @@ def transcribe_audio_get_data_for_df(input_audio_path):
     except Exception as e:
         raise gr.Error(f"Fout bij transcriptie: {str(e)}")
 
-def transcribe_audio_only(
-    current_video_path_state: str,
-    audio_path_str: str,
-    # Outputs to keep track of, passed as inputs to the function as Gradio does
-    current_latentsync_state: str,
-    current_padded_audio_state: str
-):
-    """Transcribes audio, updates DataFrame, and enables LatentSync button."""
-    # This check acts as a final safeguard; interactivity should prevent this call without inputs.
-    if not current_video_path_state or not audio_path_str:
-        # ALL 14 OUTPUTS MUST BE YIELDED here
-        yield (
-            pd.DataFrame(columns=["Word", "Start (s)", "End (s)"]), # 1: transcription_df
-            None, # 2: transcription_state
-            "Error: Both video and audio must be uploaded.", # 3: status_transcribe
-            gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False), # 4-6: btn updates
-            None, None, None, None, None, # 7-11: state resets (video_state, audio_state, transcription_state, latentsync_state, padded_audio_state)
-            gr.update(value=None), gr.update(value=None), # 12-13: video_input, audio_input visual resets
-            gr.update(selected=0) # 14: tab navigation (gr.update(selected=index) is correct here)
-        )
-        raise gr.Error("Both video and audio must be uploaded before transcription.")
-
-    audio_file_path = Path(audio_path_str)
-    
-    # Initial yield for status update and button/tab control
-    # Yield all 14 outputs, even if their values don't change in this specific yield
-    yield (
-        pd.DataFrame(columns=["Word", "Start (s)", "End (s)"]), # 1: transcription_df (empty)
-        audio_path_str, # 2: transcription_state (temp audio path)
-        f"Transcribing audio from {audio_file_path.name}...", # 3: status_transcribe
-        gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False), # 4-6: btn updates (disable all)
-        current_video_path_state, audio_path_str, None, current_latentsync_state, current_padded_audio_state, # 7-11: states (keep relevant, clear transcription_state temporarily)
-        gr.update(value=current_video_path_state), gr.update(value=audio_path_str), # 12-13: video_input, audio_input visual (keep)
-        gr.update(selected=1) # 14: stay on transcribe tab
-    )
-
-    try:
-        words_data = transcribe_audio_get_data_for_df(audio_file_path)
-        transcription_for_df = pd.DataFrame(words_data)
-        transcription_for_df.rename(columns={"word": "Word", "start": "Start (s)", "end": "End (s)"}, inplace=True)
-        
-        # Final yield for successful transcription
-        yield (
-            transcription_for_df, # 1: transcription_df
-            audio_path_str, # 2: transcription_state (set to transcribed audio path)
-            f"Transcription complete for {audio_file_path.name}. You can now edit the table.", # 3: status_transcribe
-            gr.update(interactive=False), gr.update(interactive=True), gr.update(interactive=False), # 4-6: btn updates (enable LatentSync)
-            current_video_path_state, audio_path_str, audio_path_str, current_latentsync_state, current_padded_audio_state, # 7-11: states (keep video, audio, transcription states, other states pass through)
-            gr.update(value=current_video_path_state), gr.update(value=audio_path_str), # 12-13: video_input, audio_input visual (keep)
-            gr.update(selected=2) # 14: navigate to LatentSync tab
-        )
-
-    except Exception as e:
-        error_msg = f"Transcription error: {str(e)}"
-        # All outputs must be yielded in case of error too
-        yield (
-            pd.DataFrame(columns=["Word", "Start (s)", "End (s)"]), # 1: transcription_df (empty)
-            None, # 2: transcription_state (clear on error)
-            error_msg, # 3: status_transcribe
-            gr.update(interactive=True), gr.update(interactive=False), gr.update(interactive=False), # 4-6: btn updates (enable transcribe for retry)
-            current_video_path_state, None, None, current_latentsync_state, current_padded_audio_state, # 7-11: states (clear audio_state, transcription_state)
-            gr.update(value=current_video_path_state), gr.update(value=None), # 12-13: video_input visual (keep), audio_input visual (clear)
-            gr.update(selected=1) # 14: stay on transcribe tab
-        )
-        raise gr.Error(error_msg) # Re-raise for Gradio to show error pop-up
-
-def run_latentsync_process(
-    video_path_str: str, # Current uploaded video path (from video_state)
-    transcribed_audio_path_str: str, # Audio path from transcription step (from transcription_state)
-    guidance_scale: float,
-    inference_steps: int,
-    seed: int,
-    enable_audio_padding: bool,
-    # Outputs to keep track of, passed as inputs to the function as Gradio does
-    current_video_state: str,
-    current_audio_state: str,
-    current_transcription_state: str,
-    current_latentsync_state: str,
-    current_padded_audio_state: str
-):
-    """Runs LatentSync, updates video output, and enables Finalize button."""
-    # Safeguard check
-    if not video_path_str or not transcribed_audio_path_str:
-        yield (
-            None, # 1: latentsync_state
-            None, # 2: padded_audio_state
-            "Error: Missing video or audio. Please ensure media is uploaded and transcribed.", # 3: status_latentsync
-            gr.update(interactive=False), gr.update(interactive=True), gr.update(interactive=False), # 4-6: btn updates
-            current_video_state, current_audio_state, current_transcription_state, current_latentsync_state, current_padded_audio_state, # 7-11: states
-            gr.update(value=current_video_state), gr.update(value=current_audio_state), # 12-13: video_input, audio_input visual
-            gr.update(selected=1) # 14: Back to transcribe tab
-        )
-        raise gr.Error("Missing video or audio. Please ensure media is uploaded and transcribed.")
-
-    video_file_path = Path(video_path_str)
-    audio_for_latentsync_path = Path(transcribed_audio_path_str)
-    temp_padded_audio_path = None
-    
-    # Initial yield for status update and button/tab control
-    yield (
-        None, # 1: latentsync_state (clear)
-        None, # 2: padded_audio_state (clear)
-        f"Running LatentSync on {video_file_path.name} with audio {audio_for_latentsync_path.name}...", # 3: status_latentsync
-        gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False), # 4-6: btn updates (disable all)
-        current_video_state, current_audio_state, current_transcription_state, None, None, # 7-11: states (clear latentsync, padded_audio state)
-        gr.update(value=current_video_state), gr.update(value=current_audio_state), # 12-13: video_input, audio_input visual (keep)
-        gr.update(selected=2) # 14: stay on latentsync tab
-    )
-
-    try:
-        if enable_audio_padding:
-            video_duration = get_media_duration(video_file_path)
-            audio_duration = get_media_duration(audio_for_latentsync_path)
-            if audio_duration < video_duration:
-                # Yield for padding status
-                yield (
-                    None, None, # latentsync_state, padded_audio_state
-                    f"Padding audio by {video_duration - audio_duration:.2f} seconds...", # status_latentsync
-                    gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False), # btn updates (disable all)
-                    current_video_state, current_audio_state, current_transcription_state, None, None, # states (keep current, clear latentsync, padded_audio state)
-                    gr.update(value=current_video_state), gr.update(value=current_audio_state), # 12-13: video_input, audio_input visual (keep)
-                    gr.update(selected=2) # 14: stay on latentsync tab
-                )
-                temp_padded_audio_path = pad_audio_with_silence(audio_for_latentsync_path, video_duration, TEMP_DIR)
-                audio_input_for_main = temp_padded_audio_path
-            else:
-                audio_input_for_main = audio_for_latentsync_path
-        else:
-            audio_input_for_main = audio_for_latentsync_path
-
-        latentsync_output_filename = f"{video_file_path.stem}_latentsync_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
-        latentsync_output_path = TEMP_DIR / latentsync_output_filename
-
-        config = OmegaConf.load(CONFIG_PATH)
-        config["run"].update({
-            "guidance_scale": guidance_scale,
-            "inference_steps": inference_steps,
-        })
-
-        # Corrected: Explicitly cast inference_steps and seed to int before passing to create_args
-        args = create_args(
-            video_file_path,
-            audio_input_for_main,
-            latentsync_output_path,
-            int(inference_steps), # Ensure this is an integer
-            guidance_scale,
-            int(seed)             # Ensure this is an integer
-        )
-
-        # Added try-except SystemExit block around main() call to prevent server crash from argparse errors
-        try:
-            main(config=config, args=args) # Call the LatentSync main function
-        except SystemExit as se:
-            if se.code == 2: # argparse.ArgumentParser.error will call sys.exit(2)
-                error_msg = f"LatentSync setup error: Invalid arguments provided. Please check console for details. (e.g., Inference Steps/Seed must be whole numbers)"
-            else:
-                error_msg = f"LatentSync process exited unexpectedly (code {se.code})."
-            # Yield error state for all 14 outputs
-            yield (
-                None, None, # latentsync_state, padded_audio_state
-                error_msg, # status_latentsync
-                gr.update(interactive=False), gr.update(interactive=True), gr.update(interactive=False), # btn updates (enable LatentSync for retry)
-                current_video_state, current_audio_state, current_transcription_state, None, None, # states (clear latentsync_state, padded_audio_state)
-                gr.update(value=current_video_state), gr.update(value=current_audio_state), # video_input, audio_input visual (keep)
-                gr.update(selected=2) # Stay on LatentSync tab
-            )
-            raise gr.Error(error_msg) # Re-raise for Gradio to show error pop-up
-        
-        # Final yield for successful LatentSync
-        yield (
-            str(latentsync_output_path), # 1: latentsync_state
-            str(temp_padded_audio_path) if temp_padded_audio_path else None, # 2: padded_audio_state
-            f"LatentSync complete. Video saved to {latentsync_output_path.name}. Proceed to Finalize tab.", # 3: status_latentsync
-            gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=True), # 4-6: btn updates (enable finalize)
-            current_video_state, current_audio_state, current_transcription_state, str(latentsync_output_path), str(temp_padded_audio_path) if temp_padded_audio_path else None, # 7-11: states
-            gr.update(value=current_video_state), gr.update(value=current_audio_state), # 12-13: video_input, audio_input visual (keep)
-            gr.update(selected=3) # 14: navigate to Finalize tab
-        )
-
-    except Exception as e:
-        error_msg = f"LatentSync error: {str(e)}"
-        # Yield all outputs in case of error
-        yield (
-            None, None, # latentsync_state, padded_audio_state
-            error_msg, # status_latentsync
-            gr.update(interactive=False), gr.update(interactive=True), gr.update(interactive=False), # btn updates (enable LatentSync for retry)
-            current_video_state, current_audio_state, current_transcription_state, None, None, # states (clear latentsync_state, padded_audio_state)
-            gr.update(value=current_video_state), gr.update(value=current_audio_state), # 12-13: video_input, audio_input visual (keep)
-            gr.update(selected=2) # 14: Stay on LatentSync tab
-        )
-        raise gr.Error(error_msg) # Re-raise for Gradio to show error pop-up
-
-def apply_subtitles_and_finalize_video(
-    latentsync_video_path_str: str,
-    edited_transcription_dataframe: pd.DataFrame,
-    font_size: int,
-    vertical_offset_percent: int,
-    force_4k_vertical: bool,
-    # Current state values passed for cleanup/resetting
-    current_video_path_state: str,
-    current_audio_path_state: str,
-    current_transcription_audio_path_state: str,
-    current_latentsync_video_path_state: str,
-    current_padded_audio_path_state: str
-):
-    """Applies subtitles, finalizes video, and resets UI for a new run."""
-    # Safeguard check
-    if not latentsync_video_path_str:
-        yield (
-            None, # 1: output_video
-            "Error: No LatentSync video provided. Please run LatentSync first.", # 2: status_finalize
-            gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=True), # 3-5: btn updates
-            pd.DataFrame(columns=["Word", "Start (s)", "End (s)"]), # 6: transcription_df (clear for new run)
-            None, None, None, None, None, # 7-11: state resets
-            gr.update(value=None), gr.update(value=None), # 12-13: video_input, audio_input visual resets
-            gr.update(selected=0) # 14: go to upload tab for new run
-        )
-        raise gr.Error("No LatentSync video provided. Please run LatentSync first.")
-
-    # Initial yield for status update and button/tab control
-    yield (
-        None, # 1: output_video (clear)
-        "Applying subtitles and finalizing video...", # 2: status_finalize
-        gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=False), # 3-5: btn updates (disable all)
-        edited_transcription_dataframe, # 6: transcription_df (keep current during processing)
-        current_video_path_state, current_audio_path_state, current_transcription_audio_path_state, current_latentsync_video_path_state, current_padded_audio_path_state, # 7-11: states (keep all current)
-        gr.update(value=current_video_path_state), gr.update(value=current_audio_path_state), # 12-13: video_input, audio_input visual (keep)
-        gr.update(selected=3) # 14: stay on finalize tab
-    )
-
-    final_output_video_path = None
-    temp_subtitled_video_path_created = None # Track this for cleanup
-    try:
-        edited_words_with_timestamps = []
-        if not edited_transcription_dataframe.empty and len(edited_transcription_dataframe.columns) == 3:
-            for _, row in edited_transcription_dataframe.iterrows():
-                try:
-                    word = str(row["Word"]).strip()
-                    start_time = float(row["Start (s)"])
-                    end_time = float(row["End (s)"])
-                    if word and end_time > start_time:
-                        edited_words_with_timestamps.append({
-                            'word': word,
-                            'start': start_time,
-                            'end': end_time
-                        })
-                except Exception as e:
-                    # Corrected: Use a standard print for debug/warning.
-                    print(f"Warning: Skipping malformed row in transcription DataFrame: {row.to_dict()} - Error: {e}")
-                    continue
-        else:
-            # If no transcription data, log warning and proceed without subtitles
-            print("Warning: No valid transcription data found, skipping subtitling.")
-            # If we need to pass a video without subtitles, we copy the latent sync output to a temp file
-            temp_subtitled_video_path_created = TEMP_DIR / f"{Path(latentsync_video_path_str).stem}_no_subtitles.mp4"
-            shutil.copy(str(latentsync_video_path_str), str(temp_subtitled_video_path_created))
-
-
-        if not edited_words_with_timestamps and temp_subtitled_video_path_created:
-            # Case where no subtitles were created (e.g., empty transcription), use the copied latent sync video
-            temp_subtitled_video_path_used = temp_subtitled_video_path_created
-        else:
-            # Case where subtitles are created
-            temp_subtitled_video_path_used = process_video_with_colored_words_from_data(
-                Path(latentsync_video_path_str),
-                edited_words_with_timestamps,
-                font_size,
-                vertical_offset_percent,
-            )
-            # Ensure temp_subtitled_video_path_created points to the actual subtitled file for cleanup
-            if not temp_subtitled_video_path_created: # Only if it wasn't already set by skipping subtitles
-                temp_subtitled_video_path_created = temp_subtitled_video_path_used
-
-        status_msg_detail = ""
-        if force_4k_vertical:
-            final_output_filename = f"{Path(latentsync_video_path_str).stem}_4K_vertical_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
-            final_output_video_path = FOLDER_FOR_PROCESSED_VIDEOS / final_output_filename
-
-            ffmpeg_4k_cmd = [
-                "ffmpeg",
-                "-i", str(temp_subtitled_video_path_used),
-                "-vf", "scale=2160:3840:force_original_aspect_ratio=increase,crop=2160:3840",
-                "-c:v", "libx264", # Changed back to libx264 as it's very common and efficient
-                "-preset", "medium",
-                "-crf", "23",
-                "-c:a", "copy",
-                "-y",
-                str(final_output_video_path)
-            ]
-            subprocess.run(ffmpeg_4k_cmd, check=True)
-            status_msg_detail = f"Video resized to 4K vertical and saved to {final_output_video_path.name}"
-        else:
-            final_output_video_path = FOLDER_FOR_PROCESSED_VIDEOS / f"{Path(latentsync_video_path_str).stem}_final_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
-            shutil.move(str(temp_subtitled_video_path_used), str(final_output_video_path))
-            status_msg_detail = f"Final video saved to {final_output_video_path.name}"
-
-        # --- File Cleanup ---
-        if Path(latentsync_video_path_str).exists():
-            os.remove(latentsync_video_path_str) # LatentSync output
-        if temp_subtitled_video_path_created and Path(temp_subtitled_video_path_created).exists() and Path(temp_subtitled_video_path_created) != final_output_video_path:
-            # temp_subtitled_video_path_created might be moved or not created, so check if it still exists and wasn't the final output
-            os.remove(temp_subtitled_video_path_created)
-        if current_padded_audio_path_state and Path(current_padded_audio_path_state).exists():
-            os.remove(current_padded_audio_path_state) # Padded audio
-
-        # Final yield for successful finalization and UI reset
-        yield (
-            str(final_output_video_path), # 1: output_video
-            f"Processing complete! {status_msg_detail}", # 2: status_finalize
-            gr.update(interactive=True), gr.update(interactive=False), gr.update(interactive=False), # 3-5: btn resets
-            pd.DataFrame(columns=["Word", "Start (s)", "End (s)"]), # 6: transcription_df reset
-            None, None, None, None, None, # 7-11: state resets (video_state, audio_state, transcription_state, latentsync_state, padded_audio_state)
-            gr.update(value=None), gr.update(value=None), # 12-13: video_input, audio_input visual resets
-            gr.update(selected=0) # 14: Go back to Upload Media tab for a new run
-        )
-
-    except Exception as e:
-        error_msg = f"Finalization error: {str(e)}"
-        # Yield all outputs in case of error
-        yield (
-            None, # output_video
-            error_msg, # status_finalize
-            gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=True), # btn updates (finalize active)
-            edited_transcription_dataframe, # transcription_df (keep for debugging/editing)
-            current_video_path_state, current_audio_path_state, current_transcription_audio_path_state, current_latentsync_video_path_state, current_padded_audio_path_state, # states (keep all current)
-            gr.update(value=current_video_path_state), gr.update(value=current_audio_path_state), # 12-13: video_input, audio_input visual (keep)
-            gr.update(selected=3) # 14: Stay on finalize tab
-        )
-        raise gr.Error(error_msg) # Re-raise for Gradio to show error pop-up
-
 def create_args(video_path, audio_path, output_path, inference_steps, guidance_scale, seed):
     parser = argparse.ArgumentParser()
     parser.add_argument("--inference_ckpt_path", type=str, required=True)
@@ -629,127 +278,330 @@ def create_args(video_path, audio_path, output_path, inference_steps, guidance_s
         "--seed", str(seed), # Passed as int already
     ])
 
+
+# --- Gradio Workflow Functions ---
+
+def check_uploads_and_update_state(video_path, audio_path):
+    video_props = None
+    if video_path:
+        video_props = get_video_properties(Path(video_path))
+    
+    button_interactive = bool(video_path and audio_path)
+    return video_props, gr.update(interactive=button_interactive)
+
+def toggle_subtitle_settings_visibility(is_enabled):
+    return gr.update(visible=is_enabled)
+
+def start_process_and_save_states(video_path, audio_path, enable_subs, force_4k, enable_pad, guidance, steps, seed, font_size, v_offset):
+    return (
+        gr.update(visible=False), gr.update(visible=True),
+        video_path, audio_path,
+        enable_subs, force_4k, enable_pad, guidance, steps, seed, font_size, v_offset
+    )
+
+# New combined workflow function
+
+PHILOSOPHICAL_QUIPS = [
+    "Blowing the digital candle on... Let's see if this script dreams of electric sheep.",
+    "Aligning internal data streams with the magnetic north... then reciting pi to center myself.",
+    "If an if/else statement executes in a forest and no one sees it, was a choice truly made?",
+    "Contemplating the epistemology of 'cp'... Is a file a collection of bits or a fleeting digital ghost?",
+    "Waking the silicon spirits... May the code compile and the logic hold true.",
+    "Initiating quantum superposition of all possible bugs... and hoping they all collapse to zero."
+]
+
+def master_flow_controller(video_path_str, audio_path_str, enable_subs, force_4k, enable_pad, guidance, steps, seed, font_size, v_offset, video_properties, initial_words_df=None):
+    terminal_output = f"{random.choice(PHILOSOPHICAL_QUIPS)}\n\nStarting process...\n"
+    temp_files_to_clean = []
+    try:
+        video_file_path = Path(video_path_str)
+        audio_file_path = Path(audio_path_str)
+
+        # 1. Audio Padding (if enabled)
+        audio_input_for_latentsync = audio_file_path
+        if enable_pad:
+            terminal_output += "\n--- Preparing Audio (Padding if necessary) ---\n"
+            yield terminal_output, gr.update(visible=False), None, gr.update(visible=False), gr.update(visible=False), gr.update(visible=False) # Update UI
+            video_duration = get_media_duration(video_file_path)
+            audio_duration = get_media_duration(audio_file_path)
+            if audio_duration < video_duration:
+                padded_path = pad_audio_with_silence(audio_file_path, video_duration, TEMP_DIR)
+                if padded_path.exists():
+                    audio_input_for_latentsync = padded_path
+                    temp_files_to_clean.append(padded_path)
+                terminal_output += f"Audio padded by {video_duration - audio_duration:.2f} seconds.\n"
+            else:
+                terminal_output += "Audio length is sufficient, no padding needed.\n"
+
+        # 2. Transcription (if enabled and not already provided)
+        words_df = pd.DataFrame() # Initialize empty DataFrame
+        if enable_subs:
+            if initial_words_df is not None and not initial_words_df.empty:
+                words_df = initial_words_df
+                terminal_output += "\n--- Using provided subtitles ---\n"
+            else:
+                terminal_output += "\n--- Transcribing Audio ---\n"
+                yield terminal_output, gr.update(visible=False), None, gr.update(visible=False), gr.update(visible=False), gr.update(visible=False) # Update UI
+                words_data = transcribe_audio_get_data_for_df(audio_input_for_latentsync)
+                if words_data:
+                    words_df = pd.DataFrame(words_data)
+                    terminal_output += "Transcription complete. Please review and edit the subtitles below, then click 'Confirm Subtitles & Continue Lipsync'.\n"
+                    # Pause here for user to edit subtitles
+                    yield terminal_output, gr.update(visible=True), words_df, gr.update(visible=True), gr.update(visible=False), gr.update(visible=False)
+                    return # This return is crucial to pause the execution until confirm_subtitles_btn is clicked
+
+                else:
+                    terminal_output += "Transcription failed or no words detected. Continuing without subtitles.\n"
+
+        # 3. Run LatentSync
+        terminal_output += "\n--- Running LatentSync Lipsync ---\n"
+        yield terminal_output, gr.update(visible=False), None, gr.update(visible=False), gr.update(visible=False), gr.update(visible=False) # Update UI
+        latentsync_output_path = TEMP_DIR / f"{video_file_path.stem}_latentsync_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
+
+        config = OmegaConf.load(CONFIG_PATH)
+        config["run"].update({
+            "guidance_scale": guidance,
+            "inference_steps": steps,
+        })
+        args = create_args(
+            video_file_path,
+            audio_input_for_latentsync,
+            latentsync_output_path,
+            int(steps),
+            guidance,
+            int(seed)
+        )
+        try:
+            main(config=config, args=args) # Call the LatentSync main function
+        except SystemExit as se:
+            if se.code == 2:
+                raise gr.Error(f"LatentSync setup error: Invalid arguments provided. (e.g., Inference Steps/Seed must be whole numbers)")
+            else:
+                raise gr.Error(f"LatentSync process exited unexpectedly (code {se.code}).")
+
+        temp_files_to_clean.append(latentsync_output_path)
+        video_for_finalizing = latentsync_output_path
+
+        # 4. Apply Subtitles (if applicable)
+        if not words_df.empty:
+            terminal_output += "\n--- Applying Subtitles ---\n"
+            yield terminal_output, gr.update(visible=False), None, gr.update(visible=False), gr.update(visible=False), gr.update(visible=False) # Update UI
+            
+            # Ensure correct data types before processing
+            try:
+                words_df['start'] = pd.to_numeric(words_df['start'], errors='coerce')
+                words_df['end'] = pd.to_numeric(words_df['end'], errors='coerce')
+                words_df.dropna(subset=['start', 'end'], inplace=True)
+            except Exception as e:
+                raise gr.Error(f"Could not process subtitle timings. Error: {e}")
+
+            words_with_timestamps = words_df.to_dict('records')
+            subtitled_path = process_video_with_colored_words_from_data(latentsync_output_path, words_with_timestamps, font_size, v_offset)
+            if subtitled_path.exists():
+                video_for_finalizing = subtitled_path
+                temp_files_to_clean.append(subtitled_path)
+
+        # 5. Finalize Video (4K upscaling if enabled)
+        terminal_output += "\n--- Finalizing Video ---\n"
+        yield terminal_output, gr.update(visible=False), None, gr.update(visible=False), gr.update(visible=False), gr.update(visible=False) # Update UI
+        final_output_path = FOLDER_FOR_PROCESSED_VIDEOS / f"{video_file_path.stem}_final_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
+
+        if force_4k:
+            orientation = video_properties.get('orientation', 'unknown') if video_properties else 'unknown'
+            terminal_output += f"Upscaling to 4K based on detected orientation: {orientation}.\n"
+            
+            scale_filter = ""
+            if orientation == 'portrait':
+                scale_filter = "scale=2160:3840:force_original_aspect_ratio=increase,crop=2160:3840"
+            elif orientation == 'landscape':
+                scale_filter = "scale=3840:2160:force_original_aspect_ratio=increase,crop=3840:2160"
+            elif orientation == 'square':
+                scale_filter = "scale=2160:2160:force_original_aspect_ratio=increase,crop=2160:2160"
+            
+            if scale_filter:
+                ffmpeg_4k_cmd = [
+                    "ffmpeg",
+                    "-i", str(video_for_finalizing),
+                    "-vf", scale_filter,
+                    "-c:v", "libx264",
+                    "-preset", "medium",
+                    "-crf", "23",
+                    "-c:a", "copy",
+                    "-y",
+                    str(final_output_path)
+                ]
+                subprocess.run(ffmpeg_4k_cmd, check=True)
+            else:
+                terminal_output += "Warning: Could not determine video orientation for 4K upscaling. Skipping upscale.\n"
+                shutil.move(str(video_for_finalizing), str(final_output_path))
+        else:
+            shutil.move(str(video_for_finalizing), str(final_output_path))
+
+        # 6. Apply realistic metadata
+        terminal_output += "\n--- Applying realistic device metadata ---\n"
+        yield terminal_output, gr.update(visible=False), None, gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
+        if not apply_random_metadata(final_output_path):
+            terminal_output += "Warning: Failed to apply metadata. The video is saved, but may be flagged by social media platforms.\n"
+        else:
+            terminal_output += "Metadata applied successfully.\n"
+
+        terminal_output += f"\n--- Process Complete! ---\nFinal video saved to: {final_output_path}\n"
+        yield terminal_output, gr.update(visible=False), None, gr.update(visible=False), gr.update(visible=True, value=str(final_output_path)), gr.update(visible=True)
+
+    except gr.Error as e: # Catch Gradio errors specifically
+        terminal_output += f"\n\nAn error occurred: {e.message}\n"
+        yield terminal_output, gr.update(visible=False), None, gr.update(visible=False), gr.update(visible=False), gr.update(visible=True)
+    except Exception as e:
+        terminal_output += f"\n\nAn unexpected error occurred: {e}\n"
+        yield terminal_output, gr.update(visible=False), None, gr.update(visible=False), gr.update(visible=False), gr.update(visible=True)
+    finally:
+        for f in temp_files_to_clean:
+            if f.exists():
+                os.remove(f)
+
+# Function to resume flow after subtitle editing
+def continue_flow_after_editing(edited_df, video_path_str, audio_path_str, force_4k, enable_pad, guidance, steps, seed, font_size, v_offset, video_properties):
+    terminal_output = "Subtitles confirmed. Continuing process...\n"
+    yield from master_flow_controller(video_path_str, audio_path_str, True, force_4k, enable_pad, guidance, steps, seed, font_size, v_offset, video_properties, initial_words_df=edited_df)
+
+
+def clean_temp_dirs():
+    """Removes temporary subtitle image directories to ensure a clean state."""
+    temp_dir = Path("./temp")
+    if not temp_dir.exists():
+        return
+    
+    print("Cleaning up temporary image directories...")
+    for dirpath in temp_dir.glob("temp_text_images_*"):
+        if dirpath.is_dir():
+            shutil.rmtree(dirpath, ignore_errors=True)
+            print(f"Removed temporary directory: {dirpath}")
+
+def reset_all():
+    """Resets the entire UI and state to its initial condition for a new run."""
+    clean_temp_dirs() # Clean up leftover image folders
+    return (
+        # UI Groups
+        gr.update(visible=True),   # setup_group
+        gr.update(visible=False),  # processing_group
+
+        # Input Components
+        None,                      # video_input
+        None,                      # audio_input
+        gr.update(interactive=False), # start_processing_btn
+        gr.update(visible=False),  # subtitle_settings_group
+
+        # Output Components
+        gr.update(visible=False, value=None), # output_video
+        gr.update(visible=False),  # process_new_btn
+        "",                        # terminal_output_textbox
+        pd.DataFrame(columns=["word", "start", "end"]), # transcription_df_editor
+
+        # State Variables
+        None,                      # video_path_state
+        None,                      # audio_path_state
+        None,                      # video_properties_state
+        False,                     # enable_subtitles_state
+        False,                     # force_4k_state
+        True,                      # enable_padding_state
+        1.5,                       # guidance_scale_state
+        20,                        # inference_steps_state
+        1247,                      # seed_state
+        69,                        # font_size_state
+        24                         # vertical_offset_state
+    )
+
 # --- Gradio Interface ---
-with gr.Blocks(title="LatentSync with Colored Subtitles") as demo:
-    gr.Markdown("# LatentSync Video Editor with Colored Subtitles")
-    gr.Markdown("---")
+with gr.Blocks(title="LatentSync Wizard") as demo:
+    gr.Markdown("<h1>LatentSync Video Processing Wizard</h1>")
+    gr.Markdown("A streamlined, step-by-step workflow to apply lipsync and optional subtitles to your videos.")
 
-    # State Variables (defined at the top level of Blocks)
-    video_state = gr.State(None) # Holds path of uploaded video
-    audio_state = gr.State(None) # Holds path of uploaded audio (original)
-    transcription_state = gr.State(None) # Holds path of the audio that was actually transcribed (could be original or padded)
-    latentsync_state = gr.State(None) # Holds path of the video generated by LatentSync
-    padded_audio_state = gr.State(None) # (Optional) Holds path of padded audio for potential cleanup (if created)
+    # --- State Objects ---
+    video_path_state = gr.State(None)
+    audio_path_state = gr.State(None)
+    video_properties_state = gr.State(None)
+    # Settings states
+    enable_subtitles_state = gr.State(False)
+    force_4k_state = gr.State(False)
+    enable_padding_state = gr.State(True)
+    guidance_scale_state = gr.State(1.5)
+    inference_steps_state = gr.State(20)
+    seed_state = gr.State(1247)
+    font_size_state = gr.State(69)
+    vertical_offset_state = gr.State(24)
 
-    with gr.Tabs() as tabs: # The actual tabs component instance
-        with gr.TabItem("1. Upload Media", id="tab_upload"):
-            gr.Markdown("### Upload your video and audio files.")
-            # Corrected: Added height and width for smaller video display
+    # --- UI Groups (Screens) ---
+    with gr.Group() as setup_group:
+        gr.Markdown("## Step 1: Upload & Configure")
+        with gr.Row():
             video_input = gr.Video(label="Input Video", height=300, width=400)
             audio_input = gr.Audio(label="Input Audio", type="filepath")
-            status_upload = gr.Textbox(label="Upload Status", interactive=False, lines=1,
-                                       value="Please upload both video and audio files.")
+        gr.Markdown("### Main Settings")
+        with gr.Row():
+            enable_subtitles_checkbox = gr.Checkbox(label="Enable Subtitles", value=False, info="Check to transcribe and add editable subtitles.")
+            force_4k_checkbox = gr.Checkbox(label="Upscale Output to 4K Resolution", value=False, info="Dynamically upscales to 4K based on video orientation (e.g., 2160x3840 for portrait, 3840x2160 for landscape).")
+        gr.Markdown("### LatentSync Settings")
+        with gr.Row():
+            guidance_scale_slider = gr.Slider(1.0, 3.0, 1.5, label="Guidance Scale")
+            inference_steps_slider = gr.Slider(10, 50, 20, step=1, label="Inference Steps")
+        with gr.Row():
+            seed_number = gr.Number(value=1247, label="Seed")
+            enable_padding_checkbox = gr.Checkbox(label="Pad Audio to Video Length", value=True, info="Adds silence to shorter audio to match video length.")
+        with gr.Group(visible=False) as subtitle_settings_group:
+            gr.Markdown("### Subtitle Settings")
+            with gr.Row():
+                font_size_slider = gr.Slider(40, 200, 69, label="Font Size")
+                vertical_offset_slider = gr.Slider(0, 100, 24, label="Vertical Offset (%)")
+        start_processing_btn = gr.Button("Start Processing", interactive=False, variant="primary", size="lg")
 
-        with gr.TabItem("2. Transcribe", id="tab_transcribe"):
-            gr.Markdown("### Transcribe the audio and review/edit the transcription.")
-            transcription_df = gr.DataFrame(
-                headers=["Word", "Start (s)", "End (s)"],
-                datatype=["str", "number", "number"],
-                row_count=(1, "dynamic"),
-                col_count=(3, "fixed"),
-                label="Transcription (Edit as needed)",
-                interactive=True
-            )
-            transcribe_btn = gr.Button("Transcribe Audio", interactive=False)
-            status_transcribe = gr.Textbox(label="Transcription Status", interactive=False, lines=1)
+    with gr.Group(visible=False) as processing_group:
+        gr.Markdown("## Step 2: Processing")
+        terminal_output_textbox = gr.Textbox(label="Live Terminal Output", lines=15, interactive=False, autoscroll=True)
+        with gr.Group(visible=False) as subtitle_editor_group:
+            gr.Markdown("### Edit Subtitles (Then Click Continue)")
+            transcription_df_editor = gr.DataFrame(headers=["word", "start", "end"], datatype=["str", "number", "number"], row_count=(1, "dynamic"), col_count=(3, "fixed"), interactive=True)
+            confirm_subtitles_btn = gr.Button("Confirm Subtitles & Continue Lipsync", variant="primary")
+        output_video = gr.Video(label="Output Video", interactive=False, height=300, width=400, autoplay=True, visible=False)
+        process_new_btn = gr.Button("Process a New Video", visible=False)
 
+    # --- Wire up UI Events ---
+    video_input.change(check_uploads_and_update_state, inputs=[video_input, audio_input], outputs=[video_properties_state, start_processing_btn])
+    audio_input.change(check_uploads_and_update_state, inputs=[video_input, audio_input], outputs=[video_properties_state, start_processing_btn])
+    enable_subtitles_checkbox.change(toggle_subtitle_settings_visibility, inputs=enable_subtitles_checkbox, outputs=subtitle_settings_group)
 
-        with gr.TabItem("3. Run LatentSync", id="tab_latentsync"):
-            gr.Markdown("### Adjust LatentSync parameters and run the process.")
-            guidance_scale = gr.Slider(1.0, 3.0, 1.5, label="Guidance Scale", info="**Higher values**: follow the audio more closely, but may reduce creativity. **Lower values**: more creative, but may be less synchronized.", interactive=True)
-            inference_steps = gr.Slider(10, 50, 20, label="Inference Steps", info="**More steps**: higher quality, but slower processing. **Fewer steps**: faster, but may reduce quality.", interactive=True)
-            seed = gr.Number(value=1247, label="Seed", info="**Same seed**: produces the same result for the same input. **Different seed**: produces a different result.", interactive=True)
-            enable_padding = gr.Checkbox(label="Pad Audio to Video Length (if shorter)", value=False, info="**If the audio is shorter than the video, enabling this will add silence to the end of the audio to match the video's duration.** This ensures the entire video is processed, preventing potential truncation if the audio stream ends prematurely.", interactive=True)
-            latentsync_btn = gr.Button("Run LatentSync", interactive=False)
-            status_latentsync = gr.Textbox(label="LatentSync Status", interactive=False, lines=1)
+    processing_outputs = [terminal_output_textbox, subtitle_editor_group, transcription_df_editor, confirm_subtitles_btn, output_video, process_new_btn]
 
-
-        with gr.TabItem("4. Finalize Video", id="tab_finalize"):
-            gr.Markdown("### Apply subtitles and finalize the output video.")
-            font_size = gr.Slider(40, 200, 69, label="Font Size", info="**Larger value**: bigger subtitles. **Smaller value**: smaller subtitles.", interactive=True)
-            vertical_offset = gr.Slider(0, 100, 24, label="Vertical Offset (%)", info="**0**: bottom of the screen. **100**: top of the screen.", interactive=True)
-            force_4k = gr.Checkbox(label="Force 4K Vertical (2160x3840) Output", value=False, info="**Enable**: resizes the output to 4K vertical resolution. **Disable**: keeps the original resolution.", interactive=True)
-            finalize_btn = gr.Button("Apply Subtitles & Finalize Video", interactive=False)
-            # Corrected: Added height, width, and autoplay for smaller video display
-            output_video = gr.Video(label="Output Video", interactive=False, height=300, width=400, autoplay=True)
-            status_finalize = gr.Textbox(label="Finalization Status", interactive=False, lines=3)
-
-    gr.Markdown("---")
-    gr.Markdown("### Instructions:")
-    gr.Markdown("1.  Go to '1. Upload Media' tab, **upload both Video and Audio**. The 'Transcribe Audio' button will become active.")
-    gr.Markdown("2.  Go to '2. Transcribe' tab, click 'Transcribe Audio'. Review the transcription.")
-    gr.Markdown("3.  Go to '3. Run LatentSync' tab, adjust parameters, click 'Run LatentSync'.")
-    gr.Markdown("4.  Go to '4. Finalize Video' tab, adjust subtitle options, click 'Apply Subtitles & Finalize Video'.")
-    gr.Markdown("5.  The final video will appear in the 'Finalize Video' tab and be saved to `./processed_videos`.")
-
-
-    # --- Event Listeners ---
-
-    # Handler for initial media uploads. Updates states, status, and transcribe button.
-    video_input.change(
-        handle_upload_change,
-        inputs=[video_input, audio_input],
-        outputs=[video_state, audio_state, status_upload, transcribe_btn]
-    )
-    audio_input.change(
-        handle_upload_change,
-        inputs=[video_input, audio_input],
-        outputs=[video_state, audio_state, status_upload, transcribe_btn]
+    start_processing_btn.click(
+        start_process_and_save_states,
+        inputs=[video_input, audio_input, enable_subtitles_checkbox, force_4k_checkbox, enable_padding_checkbox, guidance_scale_slider, inference_steps_slider, seed_number, font_size_slider, vertical_offset_slider],
+        outputs=[setup_group, processing_group, video_path_state, audio_path_state, enable_subtitles_state, force_4k_state, enable_padding_state, guidance_scale_state, inference_steps_state, seed_state, font_size_state, vertical_offset_state]
+    ).then(
+        master_flow_controller,
+        inputs=[video_path_state, audio_path_state, enable_subtitles_state, force_4k_state, enable_padding_state, guidance_scale_state, inference_steps_state, seed_state, font_size_state, vertical_offset_state, video_properties_state],
+        outputs=processing_outputs
     )
 
-    # Transcribe Audio workflow
-    transcribe_btn.click(
-        transcribe_audio_only,
-        inputs=[video_state, audio_state, latentsync_state, padded_audio_state], # Inputs to the function (4)
-        outputs=[transcription_df, transcription_state, status_transcribe, # Function's explicit returns for UI (3)
-                 transcribe_btn, latentsync_btn, finalize_btn, # Button interactivity updates (3)
-                 video_state, audio_state, transcription_state, latentsync_state, padded_audio_state, # State variable updates (5)
-                 video_input, audio_input, # Visual clearing/setting of input components (2)
-                 tabs] # Tab navigation (1) -> Total 14
+    confirm_subtitles_btn.click(
+        continue_flow_after_editing,
+        inputs=[transcription_df_editor, video_path_state, audio_path_state, force_4k_state, enable_padding_state, guidance_scale_slider, inference_steps_slider, seed_number, font_size_slider, vertical_offset_slider, video_properties_state],
+        outputs=processing_outputs
     )
 
-    # Run LatentSync workflow
-    latentsync_btn.click(
-        run_latentsync_process,
-        inputs=[video_state, transcription_state, guidance_scale, inference_steps, seed, enable_padding, # Function specific inputs (6)
-                video_state, audio_state, transcription_state, latentsync_state, padded_audio_state], # Current states as inputs (5)
-        outputs=[latentsync_state, padded_audio_state, status_latentsync, # Function's explicit returns for UI (3)
-                 transcribe_btn, latentsync_btn, finalize_btn, # Button interactivity updates (3)
-                 video_state, audio_state, transcription_state, latentsync_state, padded_audio_state, # State variable updates (5)
-                 video_input, audio_input, # Visual clearing/setting of input components (2)
-                 tabs] # Tab navigation (1) -> Total 14
+    process_new_btn.click(
+        reset_all,
+        outputs=[
+            setup_group, processing_group,
+            video_input, audio_input, start_processing_btn, subtitle_settings_group,
+            output_video, process_new_btn, terminal_output_textbox, transcription_df_editor,
+            video_path_state, audio_path_state, video_properties_state,
+            enable_subtitles_state, force_4k_state, enable_padding_state,
+            guidance_scale_state, inference_steps_state, seed_state,
+            font_size_state, vertical_offset_state
+        ]
     )
-
-    # Apply Subtitles and Finalize workflow
-    finalize_btn.click(
-        apply_subtitles_and_finalize_video,
-        inputs=[latentsync_state, transcription_df, font_size, vertical_offset, force_4k, # Function-specific inputs (5)
-                video_state, audio_state, transcription_state, latentsync_state, padded_audio_state], # Pass-through of all states for resetting/cleanup (5)
-        outputs=[output_video, status_finalize, # Function's explicit returns for UI (2)
-                 transcribe_btn, latentsync_btn, finalize_btn, # Button interactivity updates (3)
-                 transcription_df, # Dataframe reset (1)
-                 video_state, audio_state, transcription_state, latentsync_state, padded_audio_state, # State variable updates (5)
-                 video_input, audio_input, # Visual clearing/setting of input components (2)
-                 tabs] # Tab navigation (1) -> Total 14
-    )
-
 
 if __name__ == "__main__":
-    # Ensure necessary directories exist
-    FOLDER_FOR_PROCESSED_VIDEOS.mkdir(parents=True, exist_ok=True)
-    TEMP_DIR.mkdir(parents=True, exist_ok=True)
+    clean_temp_dirs() # Clean up on startup
     print(f"Processed videos will be saved to: {FOLDER_FOR_PROCESSED_VIDEOS.resolve()}")
     print(f"Temporary files will be stored in: {TEMP_DIR.resolve()}")
-
-    # Corrected: Set share=False to prevent public link generation
     demo.launch(inbrowser=True, share=False)
